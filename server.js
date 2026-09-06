@@ -1,117 +1,106 @@
 
-import dotenv from "dotenv";
-dotenv.config();
-
 import express from "express";
 import cors from "cors";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
-const PORT = process.env.PORT || 10000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const PORT = process.env.PORT || 10000;
+const PUBLIC_SITE_URL =
+  process.env.PUBLIC_SITE_URL || "http://localhost:" + PORT;
+
 app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Serve the website from /public
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/", (req, res) => {
-  res.sendFile(
-    path.join(__dirname, "public", "mercado.html")
-  );
+  res.sendFile(path.join(__dirname, "public", "mercado.html"));
 });
 
-// Health check
 app.get("/api/health", (req, res) => {
   res.json({
     success: true,
-    service: "MERCADO",
-    payment: "GatePay",
-    coingate: false
+    service: "mercado-backend",
+    status: "online"
   });
 });
 
-/*
-  Create a GatePay hosted checkout link
-*/
+function createGatePayUrl({ orderId, amount, currency, email }) {
+  const address = process.env.GATEPAY_ADDRESS;
+
+  if (!address) {
+    throw new Error("GATEPAY_ADDRESS is not configured");
+  }
+
+  const params = new URLSearchParams({
+    address,
+    amount: Number(amount).toFixed(2),
+    currency: String(currency || "GBP").toUpperCase(),
+    provider: process.env.GATEPAY_PROVIDER || "hosted",
+    email: email || "",
+    orderId: String(orderId)
+  });
+
+  return `https://api.gatepay.to/pay.php?${params.toString()}`;
+}
+
 app.post("/api/payment/gatepay/create", (req, res) => {
   try {
-    const {
-      orderId,
-      amount,
-      currency,
-      customer
-    } = req.body;
+    const { orderId, amount, total, currency, customer } = req.body;
+
+    const finalAmount = Number(amount ?? total);
+    const email = customer?.email || req.body.email;
 
     if (!orderId) {
       return res.status(400).json({
         success: false,
-        error: "Missing order ID"
+        error: "Missing orderId"
       });
     }
 
-    if (!customer?.email) {
-      return res.status(400).json({
-        success: false,
-        error: "Customer email is required"
-      });
-    }
-
-    const numericAmount = Number(amount);
-
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    if (!Number.isFinite(finalAmount) || finalAmount <= 0) {
       return res.status(400).json({
         success: false,
         error: "Invalid payment amount"
       });
     }
 
-    const gatePayAddress = process.env.GATEPAY_ADDRESS;
-
-    if (!gatePayAddress) {
-      return res.status(500).json({
-        success: false,
-        error: "GATEPAY_ADDRESS is not configured"
-      });
-    }
-
-    const paymentCurrency = String(
-      currency ||
-      process.env.GATEPAY_CURRENCY ||
-      "GBP"
-    ).toUpperCase();
-
-    const provider =
-      process.env.GATEPAY_PROVIDER || "hosted";
-
-    /*
-      This creates the same type of link shown
-      in your GatePay dashboard.
-    */
-    const params = new URLSearchParams({
-      address: gatePayAddress,
-      amount: numericAmount.toFixed(2),
-      currency: paymentCurrency,
-      provider,
-      email: customer.email
-    });
-
-    const paymentUrl =
-      `https://api.gatepay.to/pay.php?${params.toString()}`;
-
-    console.log("GatePay checkout created:", {
+    const paymentUrl = createGatePayUrl({
       orderId,
-      amount: numericAmount.toFixed(2),
-      currency: paymentCurrency,
-      email: customer.email
+      amount: finalAmount,
+      currency: currency || process.env.GATEPAY_CURRENCY || "GBP",
+      email
     });
 
-    res.json({
+    return res.json({
       success: true,
+      paymentUrl,
+      payment_url: paymentUrl,
       orderId,
-      payment
+      status: "PENDING"
+    });
+  } catch (error) {
+    console.error("GatePay error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Could not create payment"
+    });
+  }
+});
+
+// Compatibility route for older HTML files
+app.post("/api/payment/coingate", (req, res) => {
+  req.url = "/api/payment/gatepay/create";
+  return app._router.handle(req, res);
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`MERCADO server running on port ${PORT}`);
+  console.log(`Public URL: ${PUBLIC_SITE_URL}`);
+});
